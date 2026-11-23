@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
   <app appid='ohcmdegnceogacjmanfgciinijhkogoc'>
-    <updatecheck codebase='https://YOURUSERNAME.github.io/my-extension/yourextension.crx' version='1.0.0' />
+    <updatecheck codebase='https://LitenV10.github.io/clipboard/clipboard-ai-extension.crx' version='1.0.0' />
   </app>
 </gupdate>
