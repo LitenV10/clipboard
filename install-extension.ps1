@@ -1,103 +1,93 @@
-# Clipboard AI Extension installer
-# Downloads the published CRX, extracts its ZIP payload, and opens Chrome's
-# Extensions page. The user must enable Developer mode and click "Load unpacked".
+# Clipboard AI - self-hosted Chrome installer (Windows)
+# Uses Chrome's ExtensionSettings policy with normal_installed.
+# This is a Chrome enterprise policy configuration. It is reversible.
+# Run in the current Windows user account; no admin rights are intended.
 
 $ErrorActionPreference = "Stop"
 
+$ExtensionId = "ohcmdegnceogacjmanfgciinijhkogoc"
+$UpdateUrl = "https://LitenV10.github.io/clipboard/update.xml"
 $CrxUrl = "https://LitenV10.github.io/clipboard/clipboard-ai-extension.crx"
-$InstallDir = Join-Path $env:LOCALAPPDATA "ClipboardAI\Extension"
-$TempRoot = Join-Path $env:TEMP ("clipboard-ai-" + [guid]::NewGuid().ToString("N"))
-$CrxPath = Join-Path $TempRoot "clipboard-ai-extension.crx"
-$ZipPath = Join-Path $TempRoot "extension.zip"
+$PolicyPath = "HKCU:\Software\Policies\Google\Chrome"
+$PolicyName = "ExtensionSettings"
 
-try {
-    New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
+Write-Host "Checking Clipboard AI release files..." -ForegroundColor Cyan
 
-    Write-Host "Downloading Clipboard AI..." -ForegroundColor Cyan
-    Invoke-WebRequest -Uri $CrxUrl -OutFile $CrxPath -UseBasicParsing
+# Verify the hosted update manifest and CRX are reachable before changing policy.
+$xmlResponse = Invoke-WebRequest -Uri $UpdateUrl -UseBasicParsing
+[xml]$updateXml = $xmlResponse.Content
 
-    $bytes = [System.IO.File]::ReadAllBytes($CrxPath)
-    if ($bytes.Length -lt 16 -or [System.Text.Encoding]::ASCII.GetString($bytes, 0, 4) -ne "Cr24") {
-        throw "The downloaded file is not a valid Chrome extension package (CRX)."
-    }
+$ns = New-Object System.Xml.XmlNamespaceManager($updateXml.NameTable)
+$ns.AddNamespace("g", "http://www.google.com/update2/response")
+$appNode = $updateXml.SelectSingleNode("//g:app", $ns)
+$checkNode = $updateXml.SelectSingleNode("//g:updatecheck", $ns)
 
-    $crxVersion = [BitConverter]::ToUInt32($bytes, 4)
+if (-not $appNode -or $appNode.GetAttribute("appid") -ne $ExtensionId) {
+    throw "update.xml does not contain the expected extension ID ($ExtensionId)."
+}
+if (-not $checkNode -or $checkNode.GetAttribute("codebase") -ne $CrxUrl) {
+    throw "update.xml does not point to the expected CRX URL ($CrxUrl)."
+}
+if (-not $checkNode.GetAttribute("version")) {
+    throw "update.xml is missing the CRX version."
+}
 
-    switch ($crxVersion) {
-        3 {
-            if ($bytes.Length -lt 12) { throw "The CRX3 header is incomplete." }
-            $headerLength = [BitConverter]::ToUInt32($bytes, 8)
-            $zipOffset = 12 + [int64]$headerLength
+$crxResponse = Invoke-WebRequest -Uri $CrxUrl -Method Head -UseBasicParsing
+if ($crxResponse.StatusCode -lt 200 -or $crxResponse.StatusCode -ge 400) {
+    throw "The CRX URL did not return a successful response."
+}
+
+if (-not (Test-Path $PolicyPath)) {
+    New-Item -Path $PolicyPath -Force | Out-Null
+}
+
+# Preserve other ExtensionSettings entries if this user already has any.
+$existing = Get-ItemProperty -Path $PolicyPath -Name $PolicyName -ErrorAction SilentlyContinue
+$settings = @{}
+
+if ($existing -and $existing.$PolicyName) {
+    try {
+        $parsed = $existing.$PolicyName | ConvertFrom-Json -ErrorAction Stop
+        if ($parsed -is [System.Collections.IDictionary]) {
+            foreach ($key in $parsed.Keys) { $settings[$key] = $parsed[$key] }
         }
-        2 {
-            $publicKeyLength = [BitConverter]::ToUInt32($bytes, 8)
-            $signatureLength = [BitConverter]::ToUInt32($bytes, 12)
-            $zipOffset = 16 + [int64]$publicKeyLength + [int64]$signatureLength
-        }
-        default {
-            throw "Unsupported CRX format version: $crxVersion"
+        else {
+            foreach ($property in $parsed.PSObject.Properties) {
+                $settings[$property.Name] = $property.Value
+            }
         }
     }
-
-    if ($zipOffset -ge $bytes.Length -or $zipOffset -lt 16) {
-        throw "The CRX package has an invalid ZIP payload offset."
-    }
-
-    if ([System.Text.Encoding]::ASCII.GetString($bytes, [int]$zipOffset, 2) -ne "PK") {
-        throw "The CRX package does not contain a valid ZIP payload."
-    }
-
-    $zipBytes = New-Object byte[] ($bytes.Length - [int]$zipOffset)
-    [Array]::Copy($bytes, [int]$zipOffset, $zipBytes, 0, $zipBytes.Length)
-    [System.IO.File]::WriteAllBytes($ZipPath, $zipBytes)
-
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $ExtractDir = Join-Path $TempRoot "extracted"
-    New-Item -ItemType Directory -Path $ExtractDir -Force | Out-Null
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $ExtractDir)
-
-    if (-not (Test-Path (Join-Path $ExtractDir "manifest.json"))) {
-        throw "manifest.json was not found at the extension root. Check the CRX build."
-    }
-
-    if (Test-Path $InstallDir) {
-        Remove-Item -LiteralPath $InstallDir -Recurse -Force
-    }
-
-    $parent = Split-Path -Parent $InstallDir
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    Move-Item -LiteralPath $ExtractDir -Destination $InstallDir
-
-    Write-Host ""
-    Write-Host "Extension files installed at:" -ForegroundColor Green
-    Write-Host $InstallDir -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Chrome will now open. Enable Developer mode, click Load unpacked,"
-    Write-Host "and select the ClipboardAI\Extension folder shown above."
-    Write-Host ""
-
-    $chromeCandidates = @(
-        (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-        (Join-Path ([Environment]::GetEnvironmentVariable("ProgramFiles(x86)")) "Google\Chrome\Application\chrome.exe"),
-        (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
-    )
-
-    $chromeExe = $chromeCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-
-    if ($chromeExe) {
-        Start-Process -FilePath $chromeExe -ArgumentList "chrome://extensions"
-    }
-    else {
-        Write-Warning "Chrome was not found in its usual install locations. Open Chrome and visit chrome://extensions."
+    catch {
+        throw "Existing Chrome ExtensionSettings policy is not valid JSON. No changes were made."
     }
 }
-catch {
-    Write-Host ""
-    Write-Host "Installation preparation failed: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
+
+$settings[$ExtensionId] = @{
+    installation_mode = "normal_installed"
+    update_url = $UpdateUrl
 }
-finally {
-    if (Test-Path $TempRoot) {
-        Remove-Item -LiteralPath $TempRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+$json = $settings | ConvertTo-Json -Depth 20 -Compress
+New-ItemProperty -Path $PolicyPath -Name $PolicyName -Value $json -PropertyType String -Force | Out-Null
+
+# Remove only the old legacy entry created by the previous installer, if present.
+$legacyPath = Join-Path $PolicyPath "ExtensionInstallForcelist"
+if (Test-Path $legacyPath) {
+    $legacy = Get-ItemProperty -Path $legacyPath -ErrorAction SilentlyContinue
+    foreach ($property in $legacy.PSObject.Properties) {
+        if ($property.Name -match '^\d+$' -and "$($property.Value)" -like "$ExtensionId;*") {
+            Remove-ItemProperty -Path $legacyPath -Name $property.Name -ErrorAction SilentlyContinue
+        }
     }
 }
+
+Write-Host ""
+Write-Host "Clipboard AI installation policy has been configured." -ForegroundColor Green
+Write-Host "Extension ID: $ExtensionId"
+Write-Host "Update manifest: $UpdateUrl"
+Write-Host ""
+Write-Host "Fully exit Chrome (all windows), then reopen it." -ForegroundColor Yellow
+Write-Host "Check chrome://policy and click Reload policies."
+Write-Host "Then check chrome://extensions for Clipboard AI."
+Write-Host ""
+Write-Host "Chrome may show that it is managed by your organization because this uses a Chrome policy."
